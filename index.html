@@ -173,13 +173,20 @@ function staffPct(){ return Math.round(tasks().reduce((s,t)=>s+(+t.pct||0),0)*10
 function staffList(){ return sp().staffList||[]; }
 /* сколько получает каждый исполнитель с суммы a по проекту pid */
 /* доля сотрудников по проекту = сумма % только назначенных работ; неназначенные идут в общий остаток */
-function projStaffPct(pid){ const p=project(pid); if(!p) return staffPct(); const a=p.assign||{}; return Math.round(tasks().filter(t=>a[t.id]).reduce((s,t)=>s+(+t.pct||0),0)*100)/100; }
-function empSplit(a, pid){
-  const p=project(pid), out={};
-  for(const t of tasks()){ const e=(p&&p.assign&&p.assign[t.id])||''; if(p && !e) continue; out[e]=(out[e]||0)+a*(+t.pct||0)/100; }
+/* режим проекта: 'part' — несделанные работы идут в общий остаток; 'full' — все 30% делятся на назначенные работы пропорционально */
+function projMode(p){ return p && p.mode==='full' ? 'full' : 'part'; }
+/* фактический % каждой работы в проекте: {tid:{e,pct}} */
+function taskShares(pid){
+  const p=project(pid), out={}; if(!p){ tasks().forEach(t=>out[t.id]={e:'',pct:+t.pct||0}); return out; }
+  const a=p.assign||{}, asg=tasks().filter(t=>a[t.id]).reduce((s,t)=>s+(+t.pct||0),0);
+  const k = projMode(p)==='full' && asg>0 ? staffPct()/asg : 1;
+  tasks().forEach(t=>{ out[t.id] = a[t.id] ? {e:a[t.id], pct:(+t.pct||0)*k} : {e:'', pct:0}; });
   return out;
 }
-function empPct(pid){ const p=project(pid), out={}; for(const t of tasks()){ const e=(p&&p.assign&&p.assign[t.id])||''; if(p && !e) continue; out[e]=(out[e]||0)+(+t.pct||0); } return out; }
+function projStaffPct(pid){ const sh=taskShares(pid); return Math.round(Object.values(sh).reduce((s,x)=>s+x.pct,0)*100)/100; }
+function empPct(pid){ const sh=taskShares(pid), out={}; for(const id in sh){ const x=sh[id]; if(x.pct<=0) continue; out[x.e]=(out[x.e]||0)+x.pct; } return out; }
+function empSplit(a, pid){ const ep=empPct(pid), out={}; for(const e in ep) out[e]=a*ep[e]/100; return out; }
+function setMode(pid, m){ const p=project(pid); p.mode=m; save(); render(); haptic('light'); }
 function splitOf(a, pid){
   const p=sp(), pct=projStaffPct(pid), staff=a*pct/100, rest=a-staff, charity=rest*p.charity/100, partner=rest*p.partner/100;
   return { staff, rest, charity, partner, me: rest-charity-partner, pct };
@@ -580,12 +587,14 @@ function renderProject(p){
   ${all.length?groupByDay(all,false):`<div class="card empty" style="padding:16px">Операций пока нет</div>`}`;
 }
 function assignCard(p, st){
-  const a=p.assign||{}, names=staffList(), free=tasks().filter(t=>!a[t.id]).length;
+  const a=p.assign||{}, names=staffList(), free=tasks().filter(t=>!a[t.id]).length, sh=taskShares(p.id), full=projMode(p)==='full', r2=x=>Math.round(x*100)/100;
   const opt=(sel)=>`<option value="">— не назначено</option>`+names.map(n=>`<option ${n===sel?'selected':''}>${esc(n)}</option>`).join('');
   return `<div class="card"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-    <div class="label" style="flex:1">Кто что делает · ${projStaffPct(p.id)}% из ${staffPct()}%${free?` · <span class="warn">не назначено: ${free} — их ${Math.round((staffPct()-projStaffPct(p.id))*100)/100}% идут в общий остаток</span>`:''}</div>
+    <div class="label" style="flex:1">Кто что делает · ${projStaffPct(p.id)}% из ${staffPct()}%${free?` · <span class="warn">не назначено: ${free}${full?'':` — их ${r2(staffPct()-projStaffPct(p.id))}% идут в общий остаток`}</span>`:''}</div>
     <select style="width:auto;padding:6px 8px;font-size:13px" onchange="assignAll('${p.id}',this.value);this.value='__'"><option value="__">Всё одному…</option>${names.map(n=>`<option>${esc(n)}</option>`).join('')}</select></div>
-    ${tasks().map(t=>`<div class="split-row" style="align-items:center"><span style="flex:1;min-width:0">${esc(t.name)} <span class="hint">${t.pct}%</span>${st.paid>0?`<br><span class="hint" style="font-size:12px">${money(st.paid*t.pct/100)}</span>`:''}</span>
+    <div class="seg small" style="margin-bottom:6px"><button class="${full?'on':''}" onclick="setMode('${p.id}','full')">30% на сделанные</button><button class="${full?'':'on'}" onclick="setMode('${p.id}','part')">Остаток партнёрам</button></div>
+    <div class="hint" style="font-size:12px;margin-bottom:6px">${full?`Все ${staffPct()}% делятся только между назначенными работами (пропорционально их %).`:`Сотрудники получают % только своих работ, несделанные работы уходят в общий остаток (10% / 45% / 45%).`}</div>
+    ${tasks().map(t=>`<div class="split-row" style="align-items:center"><span style="flex:1;min-width:0">${esc(t.name)} <span class="hint">${full&&a[t.id]&&r2(sh[t.id].pct)!==+t.pct?`${t.pct}% → <b>${r2(sh[t.id].pct)}%</b>`:t.pct+'%'}</span>${st.paid>0&&sh[t.id].pct>0?`<br><span class="hint" style="font-size:12px">${money(st.paid*sh[t.id].pct/100)}</span>`:''}</span>
       <select style="width:auto;max-width:48%;padding:6px 8px;font-size:14px" onchange="setAssign('${p.id}','${t.id}',this.value)">${opt(a[t.id])}</select></div>`).join('')}</div>`;
 }
 function setAssign(pid, tid, v){ const p=project(pid); p.assign={...(p.assign||{})}; if(v) p.assign[tid]=v; else delete p.assign[tid]; save(); render(); haptic('light'); }
