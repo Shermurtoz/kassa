@@ -157,8 +157,16 @@ function fixData(){
   data.ops.forEach(o=>{ if(!o.cur) o.cur = legacy; });
   delete data.currency;
 }
-function conv(a, from, to){ if(from===to) return a; return from==='USD' ? a*data.rate : a/data.rate; }
-const amt = o => conv(o.amount, o.cur||data.disp, data.disp);
+function conv(a, from, to, rate){ const r=rate>0?rate:data.rate; if(from===to) return a; return from==='USD' ? a*r : a/r; }
+const amt = o => conv(o.amount, o.cur||data.disp, data.disp, o.rate);
+/* поле курса: id, значение по умолчанию; eqId — куда писать эквивалент */
+function rateField(id, val, oninput){ return `<div class="field" style="display:flex;align-items:center;gap:8px;margin-top:-4px">
+  <label style="margin:0;white-space:nowrap">Курс: 1 $ =</label>
+  <input id="${id}" inputmode="decimal" value="${fmtNum(val||data.rate)}" style="flex:1;padding:8px 10px" oninput="fmtInput(this);${oninput}">
+  <span class="hint">сум</span></div>`; }
+function rateVal(id){ const r=parseAmt(document.getElementById(id)?.value||0); return r>0?r:data.rate; }
+function eqText(a, cur, rate){ if(!(a>0)) return ''; return '≈ '+(cur==='USD'?moneyC(a*rate,'UZS'):moneyC(a/rate,'USD')); }
+function rememberRate(r){ if(r>0 && Math.abs(r-data.rate)>0.001) data.rate=r; }
 function sp(){ return Object.assign({...DEFAULT_SPLIT}, data.split||{}); }
 function tasks(){ return (sp().tasks||DEFAULT_TASKS); }
 function staffPct(){ return Math.round(tasks().reduce((s,t)=>s+(+t.pct||0),0)*100)/100; }
@@ -480,6 +488,7 @@ function payCard(label, x, onclick){
   return `<div class="card"><div style="display:flex;align-items:center;gap:10px">
     <div style="flex:1;min-width:0"><div class="label">${esc(label)}</div>
       <div class="mid ${x.left<-0.004?'red':''}">${money(x.left)}</div>
+      ${x.left>0.004?`<div class="hint" style="font-size:13px">≈ ${data.disp==='USD'?moneyC(x.left*data.rate,'UZS'):moneyC(x.left/data.rate,'USD')} по курсу ${fmtNum(data.rate)}</div>`:''}
       <div class="hint" style="font-size:12px">начислено ${money(x.acc)} · выплачено ${money(x.paid)}</div></div>
     <button class="btn primary" style="width:auto;padding:10px 14px" onclick="${onclick}">Выплатить</button></div></div>`;
 }
@@ -618,7 +627,8 @@ function openOp(id=null, type=null, clientId=null, projectId=null){
       <input id="f-newp" placeholder="Название нового проекта" style="margin-top:8px;display:none">
     </div>
     ${curSeg('setFormCur')}
-    <div class="field"><label>Сумма, <span class="cur-lbl"></span></label>
+    ${rateField('f-rate', o&&o.rate, 'updPreview()')}
+    <div class="field"><label>Сумма, <span class="cur-lbl"></span> <span class="hint" id="f-eq"></span></label>
       <input id="f-amount" class="amount-input" inputmode="decimal" autocomplete="off" placeholder="0" value="${o?fmtNum(o.amount):''}" oninput="fmtInput(this);updPreview()">
       <div class="quick" id="quick"></div>
       <div class="card" id="preview" style="background:var(--bg2);margin:10px 0 0;display:none"></div></div>
@@ -659,6 +669,7 @@ function setOpType(t){
 function updPreview(){
   const pv=document.getElementById('preview'); if(!pv) return;
   const a=parseAmt(document.getElementById('f-amount').value);
+  const eq=document.getElementById('f-eq'); if(eq) eq.textContent=eqText(a, formCur, rateVal('f-rate'));
   if(opType!=='payment' || !(a>0)){ pv.style.display='none'; return; }
   pv.style.display='block';
   const pj=document.getElementById('f-project'), pid=pj&&project(pj.value)?pj.value:null;
@@ -687,7 +698,8 @@ function saveOp(id){
   if(!(amount>0)){ haptic('error'); return toast('Введите сумму'); }
   if(cid==='__new'){ const c={id:uid(),name:newName,phone:'',note:'',created:Date.now()}; data.clients.push(c); cid=c.id; }
   if(pid==='__newp'){ const p={id:uid(),clientId:cid,name:newP,created:Date.now()}; data.projects.push(p); pid=p.id; }
-  const rec={clientId:cid,projectId:pid||null,type:opType,amount,cur:formCur,date,note};
+  const rate=rateVal('f-rate'); rememberRate(rate);
+  const rec={clientId:cid,projectId:pid||null,type:opType,amount,cur:formCur,rate,date,note};
   const dueEl=document.getElementById('f-due'), pr=project(pid);
   if(pr && opType==='payment' && document.getElementById('f-due-wrap').style.display!=='none'){ const nd=dueEl.value||null; if((pr.due||null)!==nd) pr.due=nd; }
   if(id) Object.assign(data.ops.find(o=>o.id===id), rec);
@@ -707,8 +719,9 @@ function openPayout(id=null, pool=null, emp=null){
     <div class="field" id="x-emp-wrap"><label>Кому</label><select id="x-emp" onchange="payEmp=this.value;payQuick()">
       ${names.map(n=>`<option ${n===payEmp?'selected':''}>${esc(n)}</option>`).join('')}<option value="" ${payEmp===''?'selected':''}>Общий расход (без сотрудника)</option></select></div>
     ${curSeg('setPayCur')}
-    <div class="field"><label>Сумма, <span class="cur-lbl"></span></label>
-      <input id="x-amount" class="amount-input" inputmode="decimal" autocomplete="off" placeholder="0" value="${o?fmtNum(o.amount):''}" oninput="fmtInput(this)">
+    ${rateField('x-rate', o&&o.rate, 'payQuick()')}
+    <div class="field"><label>Сумма, <span class="cur-lbl"></span> <span class="hint" id="x-eq"></span></label>
+      <input id="x-amount" class="amount-input" inputmode="decimal" autocomplete="off" placeholder="0" value="${o?fmtNum(o.amount):''}" oninput="fmtInput(this);payEq()">
       <div class="quick" id="x-quick"></div></div>
     <div class="field"><label>Дата</label><input type="date" id="x-date" value="${o?o.date:todayStr()}"></div>
     <div class="field"><label>Комментарий</label><input id="x-note" placeholder="Зарплата / аренда / материалы" value="${o?esc(o.note||''):''}"></div>
@@ -716,20 +729,26 @@ function openPayout(id=null, pool=null, emp=null){
     ${o?`<button class="btn danger" onclick="deleteOp('${o.id}')">Удалить выплату</button>`:''}`);
   markCur(); payQuick();
 }
-function setPayCur(c){ formCur=c; markCur(); payQuick(); }
+function setPayCur(c){ formCur=c; markCur(); payEq(); }
 function payQuick(){
   const q=document.getElementById('x-quick'); if(!q) return;
   document.getElementById('x-emp-wrap').style.display = payPool==='staff' ? 'block' : 'none';
   let leftD = poolStats()[payPool].left;
   if(payPool==='staff'){ const r=staffStats().find(r=>r.e===payEmp); leftD = r ? r.left : 0; }
-  const left=conv(leftD, data.disp, formCur);
-  q.innerHTML = left>0.004 ? `<button onclick="document.getElementById('x-amount').value='${fmtNum(formCur==='UZS'?Math.round(left):left)}'">Весь остаток: ${moneyC(left,formCur)}</button>` : '';
+  const r=rateVal('x-rate');
+  const usd=conv(leftD, data.disp, 'USD'), uzs=Math.round(usd*r);
+  q.innerHTML = usd>0.004 ? `<button onclick="payFill('USD',${Math.round(usd*100)/100})">Весь остаток: ${moneyC(usd,'USD')}</button>
+    <button onclick="payFill('UZS',${uzs})">В сумах: ${moneyC(uzs,'UZS')}</button>` : '';
+  payEq();
 }
+function payFill(cur, v){ formCur=cur; markCur(); document.getElementById('x-amount').value=fmtNum(v); payEq(); }
+function payEq(){ const e=document.getElementById('x-eq'); if(e) e.textContent=eqText(parseAmt(document.getElementById('x-amount').value), formCur, rateVal('x-rate')); }
 function savePayout(id){
   const amount=parseAmt(document.getElementById('x-amount').value);
   if(!(amount>0)){ haptic('error'); return toast('Введите сумму'); }
   const pool=document.getElementById('x-pool').value;
-  const rec={type:'payout',pool,clientId:null,projectId:null,amount,cur:formCur,
+  const rate=rateVal('x-rate'); rememberRate(rate);
+  const rec={type:'payout',pool,clientId:null,projectId:null,amount,cur:formCur,rate,
     date:document.getElementById('x-date').value||todayStr(),note:document.getElementById('x-note').value.trim()};
   if(pool==='staff') rec.emp=document.getElementById('x-emp').value; 
   if(id){ const o=data.ops.find(o=>o.id===id); delete o.emp; Object.assign(o, rec); }
@@ -748,18 +767,19 @@ function payAll(pid){
 /* ---------- Client form ---------- */
 function contractFields(){
   return `${curSeg('setClientCur')}
-    <div class="field"><label>Сумма общего договора, <span class="cur-lbl"></span></label>
+    ${rateField('c-rate', data.rate, 'advInfo()')}
+    <div class="field"><label>Сумма общего договора, <span class="cur-lbl"></span> <span class="hint" id="c-teq"></span></label>
       <input id="c-total" class="amount-input" inputmode="decimal" autocomplete="off" placeholder="0" oninput="fmtInput(this);autoAdv()"></div>
-    <div class="field"><label>Сумма аванса, <span class="cur-lbl"></span> <span class="hint" id="c-advpct"></span></label>
+    <div class="field"><label>Сумма аванса, <span class="cur-lbl"></span> <span class="hint" id="c-advpct"></span><br><span class="hint" id="c-aeq"></span></label>
       <input id="c-adv" class="amount-input" inputmode="decimal" autocomplete="off" placeholder="0" oninput="fmtInput(this);advTouched=true;advInfo()">
       <div class="hint" style="font-size:12px;margin-top:4px">Аванс запишется как полученная оплата и сразу разделится по процентам. Оставьте пустым, если аванса ещё нет.</div></div>`;
 }
 function initContract(focusId){ formCur=data.disp; advTouched=false; markCur(); setTimeout(()=>document.getElementById(focusId).focus(),250); }
 function addContractOps(cid, pid){
   const total=parseAmt(document.getElementById('c-total').value), adv=parseAmt(document.getElementById('c-adv').value);
-  const d=todayStr(), now=Date.now();
-  if(total>0) data.ops.push({id:uid(),clientId:cid,projectId:pid,type:'charge',amount:total,cur:formCur,date:d,note:'Договор',by:meName(),created:now});
-  if(adv>0) data.ops.push({id:uid(),clientId:cid,projectId:pid,type:'payment',amount:adv,cur:formCur,date:d,note:'Аванс',by:meName(),created:now+1});
+  const d=todayStr(), now=Date.now(), rate=rateVal('c-rate'); rememberRate(rate);
+  if(total>0) data.ops.push({id:uid(),clientId:cid,projectId:pid,type:'charge',amount:total,cur:formCur,rate,date:d,note:'Договор',by:meName(),created:now});
+  if(adv>0) data.ops.push({id:uid(),clientId:cid,projectId:pid,type:'payment',amount:adv,cur:formCur,rate,date:d,note:'Аванс',by:meName(),created:now+1});
 }
 function contractInvalid(){
   const total=parseAmt(document.getElementById('c-total').value), adv=parseAmt(document.getElementById('c-adv').value);
@@ -790,6 +810,8 @@ function autoAdv(){
 function advInfo(){
   const t=parseAmt(document.getElementById('c-total')?.value||0), a=parseAmt(document.getElementById('c-adv')?.value||0), e=document.getElementById('c-advpct');
   if(e) e.textContent = t>0&&a>0 ? '('+Math.round(a/t*1000)/10+'% · остаток '+moneyC(t-a,formCur)+')' : '';
+  const r=rateVal('c-rate'), te=document.getElementById('c-teq'), ae=document.getElementById('c-aeq');
+  if(te) te.textContent=eqText(t,formCur,r); if(ae) ae.textContent=eqText(a,formCur,r);
 }
 function saveClient(id){
   const name=document.getElementById('c-name').value.trim();
