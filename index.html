@@ -369,6 +369,23 @@ function setStatus(pid,st){ const p=project(pid); p.status=st; save(); render();
 /* долг клиента без проектов «не начат» */
 function debtBalance(cid){ let b=0; for(const o of data.ops) if(o.clientId===cid && (o.type==='charge'||o.type==='payment')){ const p=project(o.projectId); if(p && pStatus(p)==='new') continue; b += o.type==='charge'?amt(o):-amt(o); } return b; }
 function clientTotals(cid){ let ch=0,paid=0; for(const o of data.ops) if(o.clientId===cid){ if(o.type==='charge') ch+=amt(o); else if(o.type==='payment') paid+=amt(o); } return {ch,paid,b:ch-paid}; }
+/* доли благотворительности / партнёров по проектам: [{pid,acc,paid,left}] */
+function poolProjRows(k){
+  const acc={}, paid={}; let legacy=0;
+  for(const o of data.ops){
+    if(o.type==='payment'){ const p=o.projectId||''; acc[p]=(acc[p]||0)+splitOf(amt(o),o.projectId)[k]; }
+    else if(o.type==='payout' && o.pool===k){ if(o.projectId) paid[o.projectId]=(paid[o.projectId]||0)+amt(o); else legacy+=amt(o); }
+  }
+  const ids=[...new Set(Object.keys(acc).concat(Object.keys(paid)))];
+  const rows=ids.map(pid=>({pool:k,e:'',pid,acc:acc[pid]||0,paid:paid[pid]||0}));
+  /* старые выплаты без проекта — гасим по проектам, начиная со старых */
+  if(legacy>0.004){ let rest=legacy;
+    for(const r of rows.slice().sort((a,b)=>((project(a.pid)||{}).created||0)-((project(b.pid)||{}).created||0))){ const x=Math.min(Math.max(0,r.acc-r.paid),rest); r.paid+=x; rest-=x; if(rest<=0.004) break; }
+    if(rest>0.004){ let r=rows.find(r=>!r.pid); if(!r){ r={pool:k,e:'',pid:'',acc:0,paid:0}; rows.push(r);} r.paid+=rest; }
+  }
+  rows.forEach(r=>r.left=r.acc-r.paid); return rows;
+}
+function allProjRows(){ return staffProjRows().map(r=>({...r,pool:'staff'})).concat(...POOLS.filter(k=>k!=='staff').map(poolProjRows)); }
 /* начисления сотрудникам по проектам: [{e,pid,acc,paid,left}] */
 function staffProjRows(){
   const acc={}, paid={}, legacy={}, K=(e,p)=>e+'\u0001'+(p||'');
@@ -540,25 +557,40 @@ function payCard(label, x, onclick){
     <button class="btn primary" style="width:auto;padding:10px 14px" onclick="${onclick}">Выплатить</button></div></div>`;
 }
 function projTitle(pid){ const p=project(pid); if(!p) return '📁 Без проекта'; const c=client(p.clientId); return '📁 '+p.name+(c?' · '+c.name:''); }
-function staffByProject(){
-  const rows=staffProjRows(), groups={};
+function rowName(r){ return r.pool==='staff'?empLabel(r.e):poolName(r.pool); }
+function payRow(r){
+  const q=x=>esc(x).replace(/'/g,"&#39;");
+  return `<div class="pay-row" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--sep)">
+    <div style="flex:1;min-width:0"><div style="font-weight:600">${esc(rowName(r))}</div>
+      <div class="hint" style="font-size:12px">начислено ${money(r.acc)} · выплачено ${money(r.paid)}${r.left>0.004?` · ≈ ${data.disp==='USD'?moneyC(r.left*data.rate,'UZS'):moneyC(r.left/data.rate,'USD')}`:''}</div></div>
+    <b class="${r.left<-0.004?'red':''}" style="white-space:nowrap">${money(r.left)}</b>
+    <button class="btn primary" style="width:auto;padding:7px 10px;font-size:13px;margin:0" onclick="openPayout(null,'${r.pool}','${q(r.e)}','${r.pid}')">Выплатить</button></div>`;
+}
+function payoutsByProject(){
+  const rows=allProjRows(), groups={};
   rows.forEach(r=>(groups[r.pid]=groups[r.pid]||[]).push(r));
   const pids=Object.keys(groups).sort((a,b)=>((project(b)||{}).created||0)-((project(a)||{}).created||0));
-  if(!pids.length) return `<div class="card empty" style="padding:16px">Начислений сотрудникам пока нет</div>`;
-  const q=s=>esc(s).replace(/'/g,"&#39;");
-  return pids.map(pid=>{ const g=groups[pid].sort((a,b)=>a.e.localeCompare(b.e)), open=g.filter(r=>Math.abs(r.left)>0.004), done=g.filter(r=>Math.abs(r.left)<=0.004&&r.acc>0.004);
-    const p=project(pid);
-    return `<div class="proj-group"><div class="label" style="margin:12px 4px 6px;font-weight:600;color:var(--text)">${esc(projTitle(pid))}${p?` <span class="hint" style="font-weight:400">· ${statusTag(p)}</span>`:''}</div>
-      ${open.map(r=>payCard(empLabel(r.e), r, `openPayout(null,'staff','${q(r.e)}','${pid}')`)).join('')}
-      ${done.length?`<div class="hint" style="font-size:13px;margin:0 4px 8px">✓ Выплачено полностью: ${done.map(r=>esc(r.e||'—')+' '+money(r.acc)).join(', ')}</div>`:''}</div>`; }).join('');
+  if(!pids.length) return `<div class="card empty" style="padding:16px">Начислений пока нет</div>`;
+  const ord=r=>POOLS.indexOf(r.pool)*100+(r.pool==='staff'?(staffList().indexOf(r.e)+1||50):0);
+  return pids.map(pid=>{ const g=groups[pid].sort((a,b)=>ord(a)-ord(b)), open=g.filter(r=>Math.abs(r.left)>0.004), done=g.filter(r=>Math.abs(r.left)<=0.004&&r.acc>0.004);
+    const p=project(pid), tot=open.reduce((s,r)=>s+r.left,0);
+    return `<div class="card"><div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px"><div style="flex:1;font-weight:700">${esc(projTitle(pid))}</div>${open.length?`<b>${money(tot)}</b>`:''}</div>
+      ${p?`<div class="hint" style="font-size:12px;margin-bottom:4px">${statusTag(p)}</div>`:''}
+      ${open.map(payRow).join('')}
+      ${done.length?`<div class="hint" style="font-size:12px;padding-top:6px;border-top:1px solid var(--sep)">✓ Выплачено полностью: ${done.map(r=>esc(r.pool==='staff'?(r.e||'—'):poolName(r.pool).replace(/^\S+\s/,''))+' '+money(r.acc)).join(', ')}</div>`:''}
+      ${!open.length&&!done.length?`<div class="hint" style="font-size:13px">Начислений нет</div>`:''}</div>`; }).join('');
+}
+function payoutTotals(){
+  const ps=poolStats();
+  return `<div class="card"><div class="label" style="margin-bottom:4px">Всего к выплате</div>
+    ${POOLS.map(k=>`<div class="split-row"><span>${esc(poolName(k))}</span><b class="${ps[k].left<-0.004?'red':''}">${money(ps[k].left)}</b></div>`).join('')}</div>`;
 }
 function renderPayouts(){
-  const ps=poolStats(), ops=data.ops.filter(o=>o.type==='payout'&&inPeriod(o));
-  return `<div class="hint" style="font-size:13px;margin:0 4px 10px">Начислено — доли от всех полученных оплат за всё время. Сотрудникам начисляется по работам, назначенным в проекте, — отдельно по каждому проекту.</div>
-  <div class="section-title" style="margin-top:6px">👷 Сотрудники · ${poolStats().staff.acc>0?splitSum(data.ops.filter(o=>o.type==='payment')).pct:staffPct()}% · осталось ${money(ps.staff.left)}</div>
-  ${staffByProject()}
-  <div class="section-title">Остальные доли</div>
-  ${POOLS.filter(k=>k!=='staff').map(k=>payCard(poolName(k), ps[k], `openPayout(null,'${k}')`)).join('')}
+  const ops=data.ops.filter(o=>o.type==='payout'&&inPeriod(o));
+  return `<div class="hint" style="font-size:13px;margin:0 4px 10px">Начислено — доли от всех полученных оплат. Всё считается отдельно по каждому проекту: сотрудникам — по назначенным работам, остальным — по их %.</div>
+  ${payoutTotals()}
+  <div class="section-title">По проектам</div>
+  ${payoutsByProject()}
   <div class="section-title">Выплаты · ${periodRange(ui.period).name}</div>
   ${ops.length?groupByDay(ops):`<div class="card empty" style="padding:16px">За период выплат нет</div>`}`;
 }
@@ -782,6 +814,7 @@ function openPayout(id=null, pool=null, emp=null, pid=null){
   const o = id ? data.ops.find(x=>x.id===id) : null;
   payPool = o ? o.pool : (pool||'staff'); payEmp = o ? (o.emp||'') : (emp!=null?emp:(staffList()[0]||'')); formCur = o ? (o.cur||data.disp) : data.disp;
   payPid = o ? (o.projectId||'') : (pid!=null?pid:'');
+  if(!o && pid==null){ const rr=(payPool==='staff'?staffProjRows().filter(r=>r.e===payEmp):poolProjRows(payPool)).filter(r=>r.left>0.004&&r.pid).sort((a,b)=>((project(a.pid)||{}).created||0)-((project(b.pid)||{}).created||0)); if(rr.length) payPid=rr[0].pid; }
   const names=[...staffList()]; if(payEmp && !names.includes(payEmp)) names.push(payEmp);
   const projs=[...data.projects].sort((a,b)=>(b.created||0)-(a.created||0));
   openSheet(`<h3>${o?'Редактировать выплату':'Выплата / расход'}</h3>
@@ -806,9 +839,8 @@ function setPayCur(c){ formCur=c; markCur(); payEq(); }
 function payQuick(){
   const q=document.getElementById('x-quick'); if(!q) return;
   document.getElementById('x-emp-wrap').style.display = payPool==='staff' ? 'block' : 'none';
-  document.getElementById('x-proj-wrap').style.display = payPool==='staff' ? 'block' : 'none';
-  let leftD = poolStats()[payPool].left;
-  if(payPool==='staff'){ const r=staffProjRows().find(r=>r.e===payEmp && r.pid===payPid); leftD = r ? r.left : 0; }
+  const row = payPool==='staff' ? staffProjRows().find(x=>x.e===payEmp && x.pid===payPid) : poolProjRows(payPool).find(x=>x.pid===payPid);
+  const leftD = row ? row.left : 0;
   const r=rateVal('x-rate');
   const usd=conv(leftD, data.disp, 'USD'), uzs=Math.round(usd*r);
   q.innerHTML = usd>0.004 ? `<button onclick="payFill('USD',${Math.round(usd*100)/100})">Весь остаток: ${moneyC(usd,'USD')}</button>
@@ -824,7 +856,8 @@ function savePayout(id){
   const rate=rateVal('x-rate'); rememberRate(rate);
   const rec={type:'payout',pool,clientId:null,projectId:null,amount,cur:formCur,rate,
     date:document.getElementById('x-date').value||todayStr(),note:document.getElementById('x-note').value.trim()};
-  if(pool==='staff'){ rec.emp=document.getElementById('x-emp').value; rec.projectId=document.getElementById('x-proj').value||null; }
+  rec.projectId=document.getElementById('x-proj').value||null;
+  if(pool==='staff') rec.emp=document.getElementById('x-emp').value;
   if(id){ const o=data.ops.find(o=>o.id===id); delete o.emp; Object.assign(o, rec); }
   else data.ops.push({id:uid(),...rec,by:meName(),created:Date.now()});
   save(); closeSheet(); render(); haptic('success'); toast(id?'Сохранено':'Выплата записана');
