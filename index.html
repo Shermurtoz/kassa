@@ -75,6 +75,14 @@ nav button.on{color:var(--btn)}
 .backdrop.open{opacity:1;pointer-events:auto}
 .sheet{position:fixed;left:0;right:0;bottom:0;z-index:21;background:var(--bg);border-radius:18px 18px 0 0;padding:8px 16px calc(18px + env(safe-area-inset-bottom));max-height:calc(100vh - var(--top) - 24px);max-height:calc(100dvh - var(--top) - 24px);overflow-y:auto;transform:translateY(100%);transition:transform .25s ease}
 .sheet.open{transform:none}
+.sheet{overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+.sheet.drag{transition:none}
+.sheet-x{position:sticky;top:0;float:right;margin:-2px -6px 0 8px;width:34px;height:34px;border-radius:17px;background:var(--bg2);color:var(--hint);font-size:18px;line-height:34px;text-align:center;z-index:2;border:0;padding:0}
+body.locked{position:fixed;left:0;right:0;overflow:hidden}
+.kind{display:flex;gap:6px;margin-top:8px}
+.kind button{flex:1;padding:9px 4px;border-radius:12px;background:var(--bg2);font-size:13px;line-height:1.25;color:var(--text)}
+.kind button.on{background:var(--btn);color:var(--btn-text)}
+.kind button small{display:block;color:inherit;opacity:.75;font-size:11.5px;margin-top:2px}
 .grab{width:38px;height:5px;border-radius:3px;background:var(--sep);margin:0 auto 10px}
 .sheet h3{margin:4px 0 14px;font-size:18px}
 .field{margin-bottom:12px}
@@ -735,7 +743,9 @@ function plural(n,a,b,c){ n=Math.abs(n)%100; const n1=n%10; if(n>10&&n<20) retur
 /* ================= Sheet ================= */
 function openSheet(html){
   const s=document.getElementById('sheet');
-  s.innerHTML = '<div class="grab"></div>'+html;
+  s.innerHTML = '<button class="sheet-x" onclick="closeSheet()" aria-label="Закрыть">✕</button><div class="grab"></div>'+html;
+  s.scrollTop=0; s.style.transform='';
+  if(!ui.sheet){ ui.scrollY=window.scrollY; document.body.style.top=(-ui.scrollY)+'px'; document.body.classList.add('locked'); }
   document.getElementById('backdrop').classList.add('open');
   requestAnimationFrame(()=>s.classList.add('open'));
   ui.sheet=true; syncBack();
@@ -744,8 +754,18 @@ function closeSheet(){
   document.getElementById('sheet').classList.remove('open');
   document.getElementById('backdrop').classList.remove('open');
   if(document.activeElement) document.activeElement.blur();
+  if(ui.sheet && document.body.classList.contains('locked')){ document.body.classList.remove('locked'); document.body.style.top=''; window.scrollTo(0, ui.scrollY||0); }
+  document.getElementById('sheet').style.transform='';
   ui.sheet=false; syncBack();
 }
+/* swipe down to close the sheet */
+(function(){
+  let y0=null, dy=0, s=null;
+  document.addEventListener('touchstart', e=>{ s=document.getElementById('sheet'); if(!ui.sheet||!s.contains(e.target)||s.scrollTop>0){ y0=null; return; } y0=e.touches[0].clientY; dy=0; }, {passive:true});
+  document.addEventListener('touchmove', e=>{ if(y0===null) return; dy=e.touches[0].clientY-y0; if(dy>0 && s.scrollTop<=0){ s.classList.add('drag'); s.style.transform='translateY('+dy+'px)'; if(e.cancelable) e.preventDefault(); } else if(dy<0){ y0=null; s.classList.remove('drag'); s.style.transform=''; } }, {passive:false});
+  document.addEventListener('touchend', ()=>{ if(y0===null) return; s.classList.remove('drag'); if(dy>90) closeSheet(); else s.style.transform=''; y0=null; });
+  document.getElementById('backdrop').addEventListener('touchmove', e=>{ if(e.cancelable) e.preventDefault(); }, {passive:false});
+})();
 
 /* ---------- Operation form ---------- */
 let opType='payment', formCur='USD';
@@ -779,11 +799,11 @@ function openOp(id=null, type=null, clientId=null, projectId=null){
     ${rateField('f-rate', o&&o.rate, 'updPreview()')}
     <div class="field"><label>Сумма, <span class="cur-lbl"></span> <span class="hint" id="f-eq"></span></label>
       <input id="f-amount" class="amount-input" inputmode="decimal" autocomplete="off" placeholder="0" value="${o?fmtNum(o.amount):''}" oninput="fmtInput(this);updPreview()">
-      <div class="quick" id="quick"></div>
+      <div class="kind" id="quick"></div>
       <div class="card" id="preview" style="background:var(--bg2);margin:10px 0 0;display:none"></div></div>
     <div class="field"><label>Дата</label><input type="date" id="f-date" value="${o?o.date:todayStr()}"></div>
     <div class="field" id="f-due-wrap" style="display:none"><label>Следующий платёж по проекту (необязательно)</label><input type="date" id="f-due"></div>
-    <div class="field"><label>Комментарий</label><input id="f-note" placeholder="Аванс / этап / способ оплаты" value="${o?esc(o.note||''):''}"></div>
+    <input type="hidden" id="f-note" value="${o?esc(o.note||''):''}">
     <button class="btn primary" onclick="saveOp('${o?o.id:''}')">Сохранить</button>
     ${o?`<button class="btn danger" onclick="deleteOp('${o.id}')">Удалить операцию</button>`:''}`);
   fillProjects(pid);
@@ -807,13 +827,27 @@ function setOpType(t){
   let b=0, ch=0;
   if(ps && ps!=='__newp'){ const st=pStats(ps); b=st.b; ch=st.ch; }
   else if(!ps && sel && sel!=='__new'){ b=balance(sel); ch=data.ops.filter(o=>o.clientId===sel&&o.type==='charge').reduce((s,o)=>s+amt(o),0); }
-  const adv = ch*sp().advance/100, btns=[];
-  if(t==='payment' && ch>0 && adv<=b+0.004) btns.push([toF(adv),`Аванс ${sp().advance}%: ${moneyC(toF(adv),formCur)}`]);
-  if(t==='payment' && b>0.004) btns.push([toF(b),`Весь долг: ${moneyC(toF(b),formCur)}`]);
-  q.innerHTML = btns.map(([v,l])=>`<button onclick="document.getElementById('f-amount').value='${fmtNum(formCur==='UZS'?Math.round(v):v)}';updPreview()">${l}</button>`).join('');
+  const adv = Math.min(ch*sp().advance/100, Math.max(b,0));
+  const r2 = v => formCur==='UZS'?Math.round(v):Math.round(v*100)/100;
+  kindVals = { 'Аванс': adv>0.004?r2(toF(adv)):null, 'Оплата': null, 'Закрытие остатка': b>0.004?r2(toF(b)):null };
+  if(t==='payment'){
+    q.style.display='flex';
+    const cur=document.getElementById('f-note').value;
+    q.innerHTML = [['Аванс',`${sp().advance}%`],['Оплата','этап'],['Закрытие остатка','весь остаток']].map(([k,sub])=>{
+      const v=kindVals[k]; const lbl = v!=null ? moneyC(v,formCur) : sub;
+      return `<button data-k="${k}" class="${cur===k?'on':''}" onclick="pickKind('${k}')">${k}<small>${lbl}</small></button>`; }).join('');
+  } else { q.style.display='none'; q.innerHTML=''; }
   const dw=document.getElementById('f-due-wrap'), pr=project(ps);
   if(dw){ dw.style.display = (t==='payment' && pr) ? 'block' : 'none'; if(pr && dw.dataset.pid!==pr.id){ document.getElementById('f-due').value = pr.due||''; dw.dataset.pid=pr.id; } }
   updPreview();
+}
+let kindVals={};
+function pickKind(k){
+  document.getElementById('f-note').value=k;
+  document.querySelectorAll('#quick button').forEach(b=>b.classList.toggle('on', b.dataset.k===k));
+  const v=kindVals[k], a=document.getElementById('f-amount');
+  if(v!=null){ a.value=fmtNum(v); } else if(k==='Оплата'){ a.value=''; a.focus(); }
+  updPreview(); haptic('light');
 }
 function updPreview(){
   const pv=document.getElementById('preview'); if(!pv) return;
@@ -839,7 +873,9 @@ function saveOp(id){
   let cid=document.getElementById('f-client').value, pid=document.getElementById('f-project').value;
   const amount=parseAmt(document.getElementById('f-amount').value);
   const date=document.getElementById('f-date').value || todayStr();
-  const note=document.getElementById('f-note').value.trim();
+  let note=document.getElementById('f-note').value.trim();
+  if(opType==='charge' && ['Аванс','Оплата','Закрытие остатка'].includes(note)) note='Договор';
+  if(opType==='payment' && !note) note='Оплата';
   const newName=document.getElementById('f-new').value.trim(), newP=document.getElementById('f-newp').value.trim();
   if(cid==='__new' && !newName){ haptic('error'); return toast('Введите имя клиента'); }
   if(!cid){ haptic('error'); return toast('Выберите клиента'); }
