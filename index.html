@@ -114,6 +114,7 @@ textarea{min-height:160px;font-size:13px;font-family:ui-monospace,Menlo,monospac
 <nav id="nav">
   <button data-tab="summary" onclick="setTab('summary')"><span>📊</span>Сводка</button>
   <button data-tab="clients" onclick="setTab('clients')"><span>👥</span>Клиенты</button>
+  <button data-tab="projects" onclick="setTab('projects')"><span>📁</span>Проекты</button>
   <button data-tab="payouts" onclick="setTab('payouts')"><span>💸</span>Выплаты</button>
   <button data-tab="history" onclick="setTab('history')"><span>🧾</span>История</button>
 </nav>
@@ -173,6 +174,10 @@ function rateVal(id){ const r=parseAmt(document.getElementById(id)?.value||0); r
 function eqText(a, cur, rate){ if(!(a>0)) return ''; return '≈ '+(cur==='USD'?moneyC(a*rate,'UZS'):moneyC(a/rate,'USD')); }
 function rememberRate(r){ if(r>0 && Math.abs(r-data.rate)>0.001) data.rate=r; }
 function sp(){ return Object.assign({...DEFAULT_SPLIT}, data.split||{}); }
+/* уведомления в группу: оплаты/договоры, выплаты (временно выключены по умолчанию), утренние напоминания */
+const NOTIFY_DEF = { ops:true, payouts:false, remind:true };
+function nf(){ return Object.assign({...NOTIFY_DEF}, data.notify||{}); }
+function setNotify(k, v){ data.notify = {...nf(), [k]:v}; save(); haptic('light'); toast(v?'Уведомления включены':'Уведомления выключены'); openSettings(); }
 function tasks(){ return (sp().tasks||DEFAULT_TASKS); }
 function staffPct(){ return Math.round(tasks().reduce((s,t)=>s+(+t.pct||0),0)*100)/100; }
 function staffList(){ return sp().staffList||[]; }
@@ -260,7 +265,7 @@ function save(){
 const SH_KEY = 'cashbook_shared_v1', KINDS = ['clients','projects','ops'];
 let lastSynced = null, syncing = false, syncAgain = false;
 const clone = x => JSON.parse(JSON.stringify(x));
-const snap = d => clone({ clients:d.clients, projects:d.projects, ops:d.ops, settings:{ split:d.split, rate:d.rate } });
+const snap = d => clone({ clients:d.clients, projects:d.projects, ops:d.ops, settings:{ split:d.split, rate:d.rate, notify:d.notify } });
 function diff(base, cur){
   const ch = {}; let any = false;
   for (const k of KINDS){
@@ -280,7 +285,7 @@ function applyDiff(d, ch){
     if (r.del){ if (i>=0) d[k].splice(i,1); }
     else if (i>=0) d[k][i] = r; else d[k].push(r);
   }
-  if (ch.settings){ d.split = ch.settings.split; d.rate = ch.settings.rate; }
+  if (ch.settings){ d.split = ch.settings.split; d.rate = ch.settings.rate; d.notify = ch.settings.notify; }
 }
 function persistShared(){ try{ localStorage.setItem(SH_KEY, JSON.stringify({ data, synced:lastSynced })); }catch(e){} }
 function setSync(st){ syncState = st; const el = document.getElementById('syncDot'); if (el){ el.textContent = st==='sync'?'⟳':st==='err'?'⚠️':st==='ok'?'✓':''; el.title = st==='err'?'Нет связи с общей кассой':''; } }
@@ -301,7 +306,7 @@ async function sync(){
     const during = diff(sent, snap(data));
     lastSynced = { clients:r.clients||[], projects:r.projects||[], ops:r.ops||[], settings:r.settings || sent.settings };
     data.clients = clone(lastSynced.clients); data.projects = clone(lastSynced.projects); data.ops = clone(lastSynced.ops);
-    if (r.settings){ data.split = r.settings.split; data.rate = r.settings.rate; }
+    if (r.settings){ data.split = r.settings.split; data.rate = r.settings.rate; data.notify = r.settings.notify; }
     applyDiff(data, during);
     fixData(); persistShared();
     if (JSON.stringify(snap(data)) !== before) render();
@@ -470,9 +475,9 @@ function render(){
   }
   if (ui.projectId && project(ui.projectId)) m.innerHTML = renderProject(project(ui.projectId));
   else if (ui.clientId && client(ui.clientId)) { ui.projectId=null; m.innerHTML = renderClient(client(ui.clientId)); }
-  else { ui.clientId=null; ui.projectId=null; m.innerHTML = ui.tab==='summary'?renderSummary():ui.tab==='clients'?renderClients():ui.tab==='payouts'?renderPayouts():renderHistory(); }
-  document.getElementById('title').textContent = ui.projectId ? 'Проект' : ui.clientId ? 'Клиент' : {summary:'Сводка',clients:'Клиенты',payouts:'Выплаты',history:'История'}[ui.tab];
-  document.getElementById('periods').style.display = (ui.tab==='clients' && !ui.clientId) ? 'none' : '';
+  else { ui.clientId=null; ui.projectId=null; m.innerHTML = ui.tab==='summary'?renderSummary():ui.tab==='clients'?renderClients():ui.tab==='projects'?renderProjects():ui.tab==='payouts'?renderPayouts():renderHistory(); }
+  document.getElementById('title').textContent = ui.projectId ? 'Проект' : ui.clientId ? 'Клиент' : {summary:'Сводка',clients:'Клиенты',projects:'Проекты',payouts:'Выплаты',history:'История'}[ui.tab];
+  document.getElementById('periods').style.display = ((ui.tab==='clients'||ui.tab==='projects') && !ui.clientId) ? 'none' : '';
   if (ui.tab==='clients' && !ui.clientId){ const s=document.getElementById('q'); if(s && document.activeElement!==s && ui._focusQ){ s.focus(); s.setSelectionRange(s.value.length,s.value.length);} }
   syncBack();
 }
@@ -503,6 +508,18 @@ function groupByDay(ops, showClient=true){
   flush(); return html;
 }
 
+function quickBtns(){
+  return `<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:2px 0 12px">
+    <button class="btn primary" style="margin:0;padding:18px 8px;font-size:17px;font-weight:700" onclick="openOp(null,'payment')">↓ Оплата</button>
+    <button class="btn" style="margin:0;padding:18px 8px;font-size:17px;font-weight:700;background:var(--sec);border:2px solid var(--btn);color:var(--btn)" onclick="openContract()">📄 Договор</button></div>`;
+}
+/* новый договор: новый клиент или новый проект существующего клиента */
+function openContract(){
+  const cl=[...data.clients].sort((a,b)=>a.name.localeCompare(b.name));
+  openSheet(`<h3>Новый договор</h3>
+    <button class="btn primary" style="margin-bottom:12px" onclick="closeSheet();setTimeout(()=>openClientForm(null),250)">+ Новый клиент</button>
+    ${cl.length?`<div class="section-title">или проект для клиента</div><div class="list">${cl.map(c=>`<button class="item" onclick="closeSheet();setTimeout(()=>openProjectForm(null,'${c.id}'),250)">${avatar(c.name)}<div class="body"><div class="title">${esc(c.name)}</div><div class="sub">${clientProjects(c.id).length} ${plural(clientProjects(c.id).length,'проект','проекта','проектов')}</div></div><div class="amt hint">＋</div></button>`).join('')}</div>`:''}`);
+}
 function renderSummary(){
   const ops = data.ops.filter(inPeriod);
   const received = ops.filter(o=>o.type==='payment').reduce((s,o)=>s+amt(o),0);
@@ -512,8 +529,8 @@ function renderSummary(){
   debtors.sort((a,b)=>b[1]-a[1]);
   const payCount = ops.filter(o=>o.type==='payment').length;
   const pct = charged>0 ? Math.min(100, Math.round(received/charged*100)) : 0;
-  if(!data.clients.length) return `<div class="card empty">Пока нет данных.<br><br>Нажмите <b>+</b>, чтобы записать первую оплату или долг клиента.</div>`;
-  return `
+  if(!data.clients.length) return quickBtns()+`<div class="card empty">Пока нет данных.<br><br>Нажмите <b>Договор</b>, чтобы добавить первого клиента.</div>`;
+  return quickBtns()+`
   <div class="card"><div class="label">Получено · ${periodRange(ui.period).name}</div>
     <div class="big green">${money(received)}</div>
     <div class="hint" style="font-size:13px">${payCount} ${plural(payCount,'оплата','оплаты','оплат')}</div>
@@ -594,6 +611,22 @@ function renderPayouts(){
   <div class="section-title">Выплаты · ${periodRange(ui.period).name}</div>
   ${ops.length?groupByDay(ops):`<div class="card empty" style="padding:16px">За период выплат нет</div>`}`;
 }
+let projFilter='all';
+function setProjFilter(f){ projFilter=f; haptic('light'); render(); }
+function renderProjects(){
+  const all=[...data.projects].sort((a,b)=>(b.created||0)-(a.created||0));
+  const cnt=k=>all.filter(p=>pStatus(p)===k).length;
+  const list=all.filter(p=>projFilter==='all'||pStatus(p)===projFilter);
+  let ch=0,paid=0; list.forEach(p=>{ const s=pStats(p.id); ch+=s.ch; paid+=s.paid; });
+  const chips=[['all','Все',all.length],['work','🔨 В процессе',cnt('work')],['new','⏳ Не начат',cnt('new')],['done','✅ Закончен',cnt('done')]];
+  return `<div class="periods" style="padding:0 0 10px;position:static">${chips.map(([k,n,m])=>`<button class="chip ${projFilter===k?'on':''}" onclick="setProjFilter('${k}')">${n} · ${m}</button>`).join('')}</div>
+  ${list.length?`<div class="card"><div class="split-row" style="border:0"><span>Договоры</span><b>${money(ch)}</b></div><div class="split-row"><span>Оплачено</span><b class="green">${money(paid)}</b></div><div class="split-row"><span>Остаток</span><b class="${ch-paid>0.004?'red':''}">${money(ch-paid)}</b></div></div>
+  <div class="list">${list.map(p=>{ const st=pStats(p.id), c=client(p.clientId); return `<button class="item" onclick="openProject('${p.id}')"><div class="avatar" style="background:var(--btn)">📁</div>
+    <div class="body"><div class="title">${esc(p.name)}</div><div class="sub">👤 ${esc(c?c.name:'—')} · ${statusTag(p)}</div>
+    <div class="sub" style="font-size:12px">Договор ${money(st.ch)} · Оплачено <span class="green">${money(st.paid)}</span>${p.due&&st.b>0.004&&pStatus(p)!=='new'?` · <span class="${dueCls(p.due)}">📅 ${dueLabel(p.due)}</span>`:''}</div></div>
+    <div class="amt ${pStatus(p)==='new'?'hint':balCls(st.b)}">${Math.abs(st.b)<0.005?'0':money(Math.abs(st.b))}<small>${st.b<-0.004?'переплата':'остаток'}</small></div></button>`; }).join('')}</div>`
+  :`<div class="card empty">${all.length?'Нет проектов с таким статусом':'Проектов пока нет.<br><br>Нажмите <b>Договор</b> на сводке, чтобы добавить.'}</div>`}`;
+}
 function renderClients(){
   const q = ui.q.trim().toLowerCase();
   const list = data.clients.filter(c=>!q || c.name.toLowerCase().includes(q) || (c.phone||'').includes(q))
@@ -662,12 +695,27 @@ function renderProject(p){
   <div class="grid2"><div class="card"><div class="label">Договор</div><div class="mid">${money(st.ch)}</div></div>
     <div class="card"><div class="label">Оплачено</div><div class="mid green">${money(st.paid)}</div></div></div>
   ${assignCard(p, st)}
+  ${staffContractCard(p, st)}
   ${st.paid>0?`<div class="card"><div class="label" style="margin-bottom:4px">Распределено из оплат проекта</div>${splitRowsP(st.paid,p.id).map(([n,v])=>`<div class="split-row"><span>${n}</span><b>${money(v)}</b></div>`).join('')}</div>`:''}
   <div class="row2"><button class="btn" onclick="openOp(null,'charge','${c.id}','${p.id}')">↑ Доп. договор</button>
     <button class="btn primary" onclick="openOp(null,'payment','${c.id}','${p.id}')">↓ Оплата</button></div>
   ${st.b>0.004?`<button class="btn" style="margin-bottom:10px;color:var(--green)" onclick="payAll('${p.id}')">Закрыть остаток (${money(st.b)})</button>`:''}
   <div class="section-title">История проекта</div>
   ${all.length?groupByDay(all,false):`<div class="card empty" style="padding:16px">Операций пока нет</div>`}`;
+}
+/* сотрудники проекта: по договору / начислено с оплат / выплачено / к выплате */
+function staffContractCard(p, st){
+  const ep=empPct(p.id), names=Object.keys(ep).filter(e=>e); if(!names.length) return '';
+  const rows=staffProjRows().filter(r=>r.pid===p.id), R=e=>rows.find(r=>r.e===e)||{acc:0,paid:0,left:0};
+  const advPct=sp().advance;
+  return `<div class="card"><div class="label" style="margin-bottom:2px">👷 Сотрудникам по проекту</div>
+    <div class="hint" style="font-size:12px;margin-bottom:4px">Сумма — от всего договора ${money(st.ch)}. «С оплат» — сколько уже начислено из полученных денег${st.paid>0?` (${money(st.paid)})`:''}.</div>
+    ${names.sort((a,b)=>staffList().indexOf(a)-staffList().indexOf(b)).map(e=>{ const r=R(e), full=st.ch*ep[e]/100;
+      return `<div class="split-row" style="display:block"><div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(empLabel(e))} <span class="hint" style="font-weight:400">${Math.round(ep[e]*100)/100}%</span></b><b>${money(full)}</b></div>
+      <div class="hint" style="font-size:12px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <span>${st.paid>0?`с оплат ${money(r.acc)} · выплачено ${money(r.paid)}`:`аванс ${advPct}% ≈ ${money(full*advPct/100)} · оплат пока нет`}</span>
+        ${st.paid>0?`<span class="${r.left>0.004?'warn':r.left<-0.004?'red':'green'}" style="font-weight:600">${Math.abs(r.left)<0.005?'✓ выплачено':r.left>0?'к выплате '+money(r.left):'переплата '+money(-r.left)}</span>`:''}</div>
+      <div class="hint" style="font-size:12px">ещё по договору: ${money(Math.max(0,full-r.acc))}</div></div>`; }).join('')}</div>`;
 }
 function assignCard(p, st){
   const a=p.assign||{}, names=staffList(), free=tasks().filter(t=>!a[t.id]).length, sh=taskShares(p.id), full=projMode(p)==='full', r2=x=>Math.round(x*100)/100;
@@ -677,7 +725,7 @@ function assignCard(p, st){
     <select style="width:auto;padding:6px 8px;font-size:13px" onchange="assignAll('${p.id}',this.value);this.value='__'"><option value="__">Всё одному…</option>${names.map(n=>`<option>${esc(n)}</option>`).join('')}</select></div>
     <div class="seg small" style="margin-bottom:6px"><button class="${full?'on':''}" onclick="setMode('${p.id}','full')">30% на сделанные</button><button class="${full?'':'on'}" onclick="setMode('${p.id}','part')">Остаток партнёрам</button></div>
     <div class="hint" style="font-size:12px;margin-bottom:6px">${full?`Все ${staffPct()}% делятся только между назначенными работами (пропорционально их %).`:`Сотрудники получают % только своих работ, несделанные работы уходят в общий остаток (10% / 45% / 45%).`}</div>
-    ${tasks().map(t=>`<div class="split-row" style="align-items:center"><span style="flex:1;min-width:0">${esc(t.name)} <span class="hint">${full&&a[t.id]&&r2(sh[t.id].pct)!==+t.pct?`${t.pct}% → <b>${r2(sh[t.id].pct)}%</b>`:t.pct+'%'}</span>${st.paid>0&&sh[t.id].pct>0?`<br><span class="hint" style="font-size:12px">${money(st.paid*sh[t.id].pct/100)}</span>`:''}</span>
+    ${tasks().map(t=>`<div class="split-row" style="align-items:center"><span style="flex:1;min-width:0">${esc(t.name)} <span class="hint">${full&&a[t.id]&&r2(sh[t.id].pct)!==+t.pct?`${t.pct}% → <b>${r2(sh[t.id].pct)}%</b>`:t.pct+'%'}</span>${sh[t.id].pct>0?`<br><span class="hint" style="font-size:12px">${money(st.ch*sh[t.id].pct/100)} по договору${st.paid>0?` · ${money(st.paid*sh[t.id].pct/100)} с оплат`:''}</span>`:''}</span>
       <select style="width:auto;max-width:48%;padding:6px 8px;font-size:14px" onchange="setAssign('${p.id}','${t.id}',this.value)">${opt(a[t.id])}</select></div>`).join('')}</div>`;
 }
 function setAssign(pid, tid, v){ const p=project(pid); p.assign={...(p.assign||{})}; if(v) p.assign[tid]=v; else delete p.assign[tid]; save(); render(); haptic('light'); }
@@ -1025,6 +1073,12 @@ function openSettings(){
     <div class="hint" style="font-size:12px;margin-bottom:8px">Доля ${esc(sp().me)} = остаток − благотворительность − доля ${esc(sp().partnerName)}.</div>
     <button class="btn primary" style="margin-bottom:8px" onclick="saveSplit()">Сохранить проценты</button>
     <button class="btn" style="margin-bottom:14px" onclick="openStaffSettings()">👷 Сотрудники и работы</button>
+    <div class="section-title">Уведомления в группу</div>
+    <div class="card" style="padding:4px 14px;margin-bottom:14px">
+      ${[['ops','💰 Оплаты и договоры'],['payouts','💸 Выплаты'],['remind','⏰ Утренние напоминания о сроках']].map(([k,n])=>`<label class="split-row" style="align-items:center;cursor:pointer">
+        <span>${n}</span><span style="display:flex;align-items:center;gap:8px"><span class="hint" style="font-size:12px">${nf()[k]?'вкл':'выкл'}</span>
+        <input type="checkbox" style="width:22px;height:22px;margin:0" ${nf()[k]?'checked':''} onchange="setNotify('${k}',this.checked)"></span></label>`).join('')}
+    </div>
     <div class="card" style="background:var(--bg2)"><div class="label">Где хранятся данные</div>
       <div style="margin-top:4px">${SHARED?(syncState==='err'?'⚠️ Нет связи с общей кассой — проверьте интернет':'👥 Общая касса (Google Таблица) — все изменения видят все участники'+(ui.me?'<br><span class="hint" style="font-size:13px">Вы: '+esc(ui.me.name)+' · ID '+esc(ui.me.id)+'</span>':'')):useCloud?(syncState==='err'?'⚠️ Облако Telegram недоступно — проверьте интернет':'☁️ В облаке Telegram — доступны с любого вашего устройства'):'💾 Только в этом браузере (приложение открыто не через Telegram-бота)'}</div>
       <div class="hint" style="font-size:13px;margin-top:4px">Клиентов: ${data.clients.length} · Операций: ${data.ops.length}</div></div>
